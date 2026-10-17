@@ -16,8 +16,15 @@ from pathlib import Path
 from Games.base_game import BaseGame
 from Utils.atomic_write import write_atomic_text
 from Utils.config_paths import get_profiles_dir
-from Utils.deploy import LinkMode
-from Utils.modlist import read_modlist
+try:
+    from Utils.deployment import LinkMode
+    from Utils.mods.modlist import read_modlist
+except ModuleNotFoundError as e:
+    if e.name not in {"Utils.deployment", "Utils.mods"}:
+        raise
+    # Keep the private handler usable with its original 2.4 source checkout.
+    from Utils.deploy import LinkMode
+    from Utils.modlist import read_modlist
 
 _PROFILES_DIR = get_profiles_dir()
 
@@ -40,6 +47,15 @@ class CrimsonDesert(BaseGame):
 
     @property
     def root_folder_deploy_enabled(self) -> bool:
+        return False
+
+    @property
+    def restore_before_deploy(self) -> bool:
+        # CDUMM rebuilds the overlay from its own baseline during apply.
+        return False
+
+    @property
+    def restore_on_close_eligible(self) -> bool:
         return False
 
     def __init__(self):
@@ -95,7 +111,7 @@ class CrimsonDesert(BaseGame):
         return self._prefix_path
 
     def get_deploy_mode(self) -> LinkMode:
-        return self._deploy_mode
+        return LinkMode.COPY
 
     def set_staging_path(self, path: Path | str | None) -> None:
         self._staging_path = Path(path) if path else None
@@ -109,8 +125,30 @@ class CrimsonDesert(BaseGame):
         self._deploy_mode = mode
         self.save_paths()
 
+    def deployment_preflight_error(self) -> str | None:
+        backend = _load_backend_module()
+        command = backend.discover_backend()
+        if command is None or self._game_path is None:
+            return "Crimson Desert backend or game path is unavailable."
+        if not (self._game_path / "CDMods" / "cdumm.db").is_file():
+            return None
+        outdated = [
+            mod["name"] for mod in backend.list_mods(command, self._game_path)
+            if mod.get("enabled") and "outdated" in str(mod.get("status", ""))
+        ]
+        if outdated:
+            return (
+                "Crimson game version differs from enabled mods; verify the game "
+                "update and re-import compatible sources before Deploy: "
+                + ", ".join(outdated)
+            )
+        return None
+
     def deploy(self, log_fn=None, mode=LinkMode.COPY, profile="default", progress_fn=None):
         del mode, progress_fn
+        preflight = self.deployment_preflight_error()
+        if preflight:
+            raise RuntimeError(preflight)
         log = log_fn or (lambda _message: None)
         backend = _load_backend_module()
         command = backend.discover_backend()
@@ -205,6 +243,8 @@ class CrimsonDesert(BaseGame):
                 "Crimson backend did not activate every enabled profile mod: "
                 + ", ".join(str(mod_id) for mod_id in missing)
             )
+        if ordered_ids:
+            backend.verify_overlay(self._game_path)
         active = [mod["name"] for mod in backend_mods if mod.get("status") == "active"]
         log(f"Crimson deploy complete; active backend mods: {', '.join(active) or 'none'}.")
 

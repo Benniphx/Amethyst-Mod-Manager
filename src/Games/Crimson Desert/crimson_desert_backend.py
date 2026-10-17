@@ -17,6 +17,13 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from Utils.environment.xdg import host_env
+except ModuleNotFoundError as e:
+    if e.name not in {"Utils.environment", "Utils.environment.xdg"}:
+        raise
+    from Utils.xdg import host_env
+
 
 class CrimsonBackendError(RuntimeError):
     """Raised when the Crimson Desert backend is missing or reports failure."""
@@ -69,7 +76,7 @@ def run_worker(
 ) -> dict:
     """Run one CDUMM worker command and return its final ``done`` message."""
     log = log_fn or (lambda _message: None)
-    env = os.environ.copy()
+    env = host_env()
     if command.cwd is not None:
         source_dir = str(command.cwd / "src")
         current = env.get("PYTHONPATH", "")
@@ -173,7 +180,7 @@ def _run_cli(
     args: Iterable[str],
     timeout: float = 120.0,
 ) -> str:
-    env = os.environ.copy()
+    env = host_env()
     if command.cwd is not None:
         source_dir = str(command.cwd / "src")
         current = env.get("PYTHONPATH", "")
@@ -245,6 +252,24 @@ def list_mods(command: BackendCommand, game_dir: Path) -> list[dict]:
     except json.JSONDecodeError as e:
         raise CrimsonBackendError("CDUMM returned an invalid mod list") from e
     return value if isinstance(value, list) else []
+
+
+def verify_overlay(game_dir: Path) -> None:
+    """Reject CDUMM's false 'active' result from reserved voice archives alone."""
+    papgt = (game_dir / "meta" / "0.papgt").read_bytes()
+    for marker in game_dir.glob("*/_cdumm_overlay.marker"):
+        overlay = marker.parent
+        if (
+            overlay.name.isdigit()
+            and len(overlay.name) == 4
+            and (overlay / "0.paz").is_file()
+            and (overlay / "0.pamt").is_file()
+            and (overlay / "0.paz").stat().st_size > 0
+            and (overlay / "0.pamt").stat().st_size > 0
+            and overlay.name.encode("ascii") + b"\0" in papgt
+        ):
+            return
+    raise CrimsonBackendError("CDUMM reported active mods without a registered archive overlay.")
 
 
 def apply(
